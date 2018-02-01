@@ -1,14 +1,22 @@
 from __future__ import absolute_import
 
+import logging
+
 from django.conf import settings
+from django.contrib.auth import logout
 from rest_framework import serializers, status
 from rest_framework.response import Response
 
+from sentry import roles
+from sentry.api import client
 from sentry.api.bases.user import UserEndpoint
+from sentry.api.decorators import sudo_required
 from sentry.api.serializers import serialize
 from sentry.api.serializers.models.user import DetailedUserSerializer
 from sentry.auth.superuser import is_active_superuser
-from sentry.models import User, UserOption
+from sentry.models import Organization, OrganizationMember, OrganizationStatus, User, UserOption
+
+delete_logger = logging.getLogger('sentry.deletions.ui')
 
 
 class BaseUserSerializer(serializers.ModelSerializer):
@@ -89,3 +97,69 @@ class UserDetailsEndpoint(UserEndpoint):
             return Response(serialize(user, request.user))
 
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+    @sudo_required
+    def delete(self, request, user):
+        """
+        Delete User Account
+
+        Also removes organizations if they are an owner
+        :pparam string user_id: user id
+        :param list organizations: List of organization ids to remove
+        :auth required:
+        """
+
+        # from `frontend/remove_account.py`
+        org_list = Organization.objects.filter(
+            member_set__role=roles.get_top_dog().id,
+            member_set__user=user,
+            status=OrganizationStatus.VISIBLE,
+        )
+        org_results = []
+        for org in sorted(org_list, key=lambda x: x.name):
+            # O(N) query
+            org_results.append({
+                'organization': org,
+                'single_owner': org.has_single_owner(),
+            })
+
+        avail_org_slugs = set([o['organization'].slug for o in org_results])
+        orgs_to_remove = set(request.DATA.get('organizations')).intersection(avail_org_slugs)
+
+        for result in org_results:
+            if result['single_owner']:
+                orgs_to_remove.add(result['organization'].slug)
+
+        delete_logger.info(
+            'user.deactivate',
+            extra={
+                'actor_id': request.user.id,
+                'ip_address': request.META['REMOTE_ADDR'],
+            }
+        )
+
+        for org_slug in orgs_to_remove:
+            client.delete(
+                path='/organizations/{}/'.format(org_slug),
+                request=request,
+                is_sudo=True)
+
+        remaining_org_ids = [
+            o.id for o in org_list if o.slug in avail_org_slugs.difference(orgs_to_remove)
+        ]
+
+        if remaining_org_ids:
+            OrganizationMember.objects.filter(
+                organization__in=remaining_org_ids,
+                user=request.user,
+            ).delete()
+
+        User.objects.filter(
+            id=request.user.id,
+        ).update(
+            is_active=False,
+        )
+
+        logout(request)
+
+        return Response(status=status.HTTP_204_NO_CONTENT)

@@ -366,6 +366,7 @@ const Stream = createReactClass({
 
     let url = this.getGroupListEndpoint();
 
+    // Remove leading and trailing whitespace
     let query = this.state.query.replace(/^\s+|\s+$/g, '');
 
     let activeEnvironment = this.state.activeEnvironment;
@@ -383,12 +384,14 @@ const Stream = createReactClass({
     // The global environment wins unless there one is specified by the saved search
     let queryObj = queryToObj(query);
     if ('environment' in queryObj) {
+      // Set the global environment to the one specified by the saved search
       if (queryObj.environment !== activeEnvName) {
         let env = EnvironmentStore.getByName(queryObj.environment);
         setActiveEnvironment(env);
       }
       requestParams.environment = queryObj.environment;
     } else if (activeEnvironment) {
+      // Set the environment of the query to match the global settings
       query = objToQuery({
         ...queryObj,
         environment: activeEnvironment.name,
@@ -532,11 +535,13 @@ const Stream = createReactClass({
       let query = this.state.query;
 
       if (environment) {
+        // Environment has changed: append the new environment to the query
         query = objToQuery({
           ...queryToObj(this.state.query),
           environment: environment.name,
         });
       } else {
+        // Environment is null, remove it from the query
         let queryObj = queryToObj(this.state.query);
         delete queryObj.environment;
         query = objToQuery({
